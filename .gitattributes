@@ -1,0 +1,17 @@
+# Scripts de shell SIEMPRE con LF (sino Git Bash no los ejecuta bien en Windows)
+*.sh          text eol=lf
+*.bash        text eol=lf
+
+# Plantillas markdown: LF también para consistencia cross-platform
+*.md          text eol=lf
+
+# PowerShell: CRLF (nativo Windows)
+*.ps1         text eol=crlf
+
+# Binarios explícitos
+*.png         binary
+*.jpg         binary
+*.pdf         binary
+
+# El resto: por default auto
+*             text=auto

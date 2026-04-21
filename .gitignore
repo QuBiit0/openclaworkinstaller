@@ -1,0 +1,28 @@
+# Sandboxes de testing
+/tmp/
+test_*
+onefix*/
+
+# Backup files
+*.bak
+*.bak-*
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Secrets (nunca commitear)
+.env
+.env.local
+**/*.key
+**/*.pem
+**/secrets*
+
+# PDFs no necesarios para el installer (pueden ir en docs/ separado)
+# (Los PDFs de OpenClaw se commitean si son referencia útil — si no, descomentar:)
+# docs/*.pdf
+
+# Editores
+.vscode/
+.idea/
+*.swp
