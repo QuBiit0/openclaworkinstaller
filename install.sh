@@ -28,7 +28,7 @@ set -euo pipefail
 # CONFIG
 # =====================================================================
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 # Cuando el script se baja con curl | bash, BASH_SOURCE puede no existir (se lee de stdin)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
 TEMPLATES_DIR=""
@@ -393,11 +393,17 @@ detect_openclaw_config() {
     return
   fi
 
+  # Convertir path a Windows nativo para que Python lo pueda leer
+  local config_path_native
+  config_path_native="$(to_windows_path "$CONFIG_FILE" 2>/dev/null || echo "$CONFIG_FILE")"
+
   local tmp_out
   tmp_out="$(mktemp)"
-  "$PYTHON" - "$CONFIG_FILE" > "$tmp_out" 2>/dev/null <<'PYEOF' || true
+  "$PYTHON" - "$config_path_native" > "$tmp_out" 2>/dev/null <<'PYEOF' || true
 import json, re, os, sys
 p = sys.argv[1]
+if not os.path.exists(p):
+    sys.exit(0)
 with open(p, 'r', encoding='utf-8') as f: s = f.read()
 s = re.sub(r'//[^\n]*', '', s)
 s = re.sub(r'/\*.*?\*/', '', s, flags=re.DOTALL)
@@ -408,16 +414,36 @@ try:
 except Exception:
     sys.exit(0)
 defaults = (d.get('agents') or {}).get('defaults', {}) or {}
-model = defaults.get('model') or (d.get('agent') or {}).get('model', '') or ''
+model_obj = defaults.get('model') or (d.get('agent') or {}).get('model') or ''
+# model puede ser string o dict {"primary": "..."}
+if isinstance(model_obj, dict):
+    model = model_obj.get('primary', '') or model_obj.get('default', '') or ''
+else:
+    model = model_obj
 channels = list((d.get('channels') or {}).keys())
+# Detectar si tiene meta (firma de integridad) — AVISAR al user
+has_meta = 'meta' in d
+has_gateway = 'gateway' in d
 print(f"MODEL={model}")
 print(f"CHANNELS={','.join(channels)}")
+print(f"HAS_META={'1' if has_meta else '0'}")
+print(f"HAS_GATEWAY={'1' if has_gateway else '0'}")
 PYEOF
   DETECTED_MODEL="$(grep '^MODEL=' "$tmp_out" 2>/dev/null | cut -d= -f2- 2>/dev/null || true)"
   DETECTED_CHANNELS="$(grep '^CHANNELS=' "$tmp_out" 2>/dev/null | cut -d= -f2- 2>/dev/null || true)"
+  local has_meta
+  has_meta="$(grep '^HAS_META=' "$tmp_out" 2>/dev/null | cut -d= -f2- 2>/dev/null || echo 0)"
   DETECTED_MODEL="${DETECTED_MODEL:-}"
   DETECTED_CHANNELS="${DETECTED_CHANNELS:-}"
   rm -f "$tmp_out"
+
+  # Si el config tiene meta (firma integridad de openclaw setup/onboard),
+  # preferimos usar openclaw CLI que respeta esa firma
+  if [[ "$has_meta" == "1" ]]; then
+    HAS_OPENCLAW_META="1"
+  else
+    HAS_OPENCLAW_META="0"
+  fi
 
   if [[ -n "$DETECTED_MODEL" ]] || [[ -n "$DETECTED_CHANNELS" ]]; then
     info "Detectado en \`openclaw.json\`:"
@@ -977,45 +1003,47 @@ backup_existing_config() {
 
 write_config_personal() {
   local workspace="$OPENCLAW_HOME/workspace"
+  local workspace_native
+  workspace_native="$(to_windows_path "$workspace")"
   mkdir -p "$OPENCLAW_HOME"
 
-  if [[ -z "$PYTHON" ]] || [[ ! -f "$CONFIG_FILE" ]]; then
-    # Sin Python o sin config previo → generar uno mínimo
+  # En modo personal no hay agents.list — solo ajustamos workspace paths
+  # Si openclaw CLI está instalado, el usuario ya tiene config propio — no hay nada que registrar
+  # Si hay Python, mergeamos preservando todo lo previo
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    # Sin config previo → generar uno mínimo (requiere openclaw setup después)
     cat > "$CONFIG_FILE" <<EOF
 // OpenClaw config — generado por install.sh v$VERSION el $(date +%Y-%m-%d)
-// Modo: personal (single agent)
-// Nota: este archivo se crea si no existía. Si corriste \`openclaw setup\` antes,
-// tu config previa se respetó y estos son solo ajustes mínimos.
+// Modo: personal. Corré \`openclaw setup\` para configurar canal y modelo.
 {
   "agent": {
-    "workspace": "$workspace"
+    "workspace": "$workspace_native"
   },
   "agents": {
     "defaults": {
-      "workspace": "$workspace"
+      "workspace": "$workspace_native"
     }
   },
   "bindings": []
 }
 EOF
+    warn "No hay config previo — escribí uno mínimo. Corré 'openclaw setup' para completar."
     return
   fi
 
-  # Con Python + config existente → mergear para preservar todo
-  local new_agents_file
-  new_agents_file="$(mktemp)"
-  cat > "$new_agents_file" <<EOF
-{
-  "orchestrator_id": "",
-  "agents_list": [],
-  "a2a_allow": []
-}
-EOF
-  # Para personal no tocamos agents.list. Solo actualizamos agent.workspace.
-  # Ejecutamos un merger simplificado inline.
-  CONFIG_PATH="$CONFIG_FILE" NEW_AGENTS_PATH="$new_agents_file" \
-    WORKSPACE_PATH="$workspace" \
-    "$PYTHON" - <<'PYEOF'
+  if [[ -z "$PYTHON" ]]; then
+    info "Config previo detectado — no lo modifico (sin Python no puedo mergear de forma segura)"
+    info "Si necesitás cambiar el workspace, hacelo con: openclaw config patch"
+    return
+  fi
+
+  # Con Python + config existente → mergear de forma mínima, preservando TODO
+  local config_native
+  config_native="$(to_windows_path "$CONFIG_FILE")"
+
+  CONFIG_PATH="$config_native" WORKSPACE_PATH="$workspace_native" \
+    "$PYTHON" - <<'PYEOF' || warn "Merge personal falló — tu config previo se mantiene intacto"
 import json, re, os, sys
 CFG = os.environ['CONFIG_PATH']
 WS  = os.environ['WORKSPACE_PATH']
@@ -1025,6 +1053,9 @@ def strip_json5(s):
     s = re.sub(r'(?<=[{,\s])([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'"\1":', s)
     s = re.sub(r',(\s*[}\]])', r'\1', s)
     return s
+if not os.path.exists(CFG):
+    print(f"ERROR: config no existe en {CFG}")
+    sys.exit(1)
 with open(CFG, 'r', encoding='utf-8') as f:
     cfg = json.loads(strip_json5(f.read()))
 cfg.setdefault('agent', {})['workspace'] = WS
@@ -1033,24 +1064,146 @@ with open(CFG, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
 print("MERGE=OK (personal)")
 PYEOF
-  rm -f "$new_agents_file"
 }
 
-write_config_empresa() {
+# Convierte path POSIX (/c/Users/x) → Windows nativo (C:\Users\x) si cygpath existe
+# Necesario para pasar paths a Python de Windows desde Git Bash
+to_windows_path() {
+  local p="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$p" 2>/dev/null || echo "$p"
+  else
+    echo "$p"
+  fi
+}
+
+# Detectar si openclaw CLI está instalado y funcional
+has_openclaw_cli() {
+  command -v openclaw >/dev/null 2>&1
+}
+
+# =====================================================================
+# ESTRATEGIA PRIMARIA: usar `openclaw agents add` (respeta firmas meta)
+# =====================================================================
+register_agents_via_cli() {
+  local orch_id="$1" areas_list="$2"
+
+  info "Usando ${C_BOLD}openclaw agents add${C_RESET} (respeta firmas de integridad del config)"
+
+  # Registrar especialistas (el orquestador queda como default implícito = 'main')
+  IFS=',' read -ra ROLES <<< "$areas_list"
+  for role in "${ROLES[@]}"; do
+    role="$(echo "$role" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    [[ -z "$role" ]] && continue
+    [[ "$role" == "$orch_id" ]] && continue
+    [[ "$role" == "main" ]] && continue  # 'main' es reservado para el default
+    local ws="$OPENCLAW_HOME/workspace-$role"
+    local ws_native
+    ws_native="$(to_windows_path "$ws")"
+
+    # openclaw agents add <id> --workspace <path> --non-interactive
+    if openclaw agents add "$role" --workspace "$ws_native" --non-interactive >/dev/null 2>&1; then
+      ok "Agente registrado: $role"
+    else
+      # Puede fallar si ya existe — probar update via --workspace
+      warn "Agente '$role' quizá ya existía — intentando update..."
+      openclaw agents set-identity --agent "$role" --from-identity --workspace "$ws_native" >/dev/null 2>&1 || \
+        warn "No se pudo re-registrar $role — agregalo manualmente con: openclaw agents add $role --workspace \"$ws_native\""
+    fi
+  done
+
+  # Nota sobre orquestador
+  info "El orquestador '$orch_id' usa el workspace default ($OPENCLAW_HOME/workspace)"
+  info "OpenClaw lo trata como agente 'main' implícito (default) — no hace falta registrarlo explícitamente."
+
+  # Habilitar A2A
+  if [[ -n "$PYTHON" ]] && [[ -n "$MERGE_SCRIPT" ]]; then
+    # El merger solo agrega tools.agentToAgent — no toca agents.list (ya lo hizo la CLI)
+    enable_a2a_via_merger "$orch_id" "$areas_list"
+  else
+    warn "Sin Python — A2A debe habilitarse manualmente en openclaw.json:"
+    warn '  tools.agentToAgent.enabled: true'
+    warn "  tools.agentToAgent.allow: [\"main\",\"$(echo $areas_list | tr ',' '","' )\"]"
+  fi
+}
+
+# Merger Python SOLO para agregar tools.agentToAgent (preserva TODO lo demás)
+enable_a2a_via_merger() {
+  local orch_id="$1" areas_list="$2"
+  local allow_json="\"main\""
+
+  IFS=',' read -ra ROLES <<< "$areas_list"
+  for role in "${ROLES[@]}"; do
+    role="$(echo "$role" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    [[ -z "$role" ]] && continue
+    [[ "$role" == "$orch_id" ]] && continue
+    [[ "$role" == "main" ]] && continue
+    allow_json="$allow_json,\"$role\""
+  done
+
+  local payload="$(mktemp)"
+  cat > "$payload" <<EOF
+{
+  "a2a_allow": [$allow_json]
+}
+EOF
+
+  local config_native payload_native
+  config_native="$(to_windows_path "$CONFIG_FILE")"
+  payload_native="$(to_windows_path "$payload")"
+
+  CONFIG_PATH="$config_native" NEW_AGENTS_PATH="$payload_native" \
+    "$PYTHON" - <<'PYEOF' 2>&1 | tail -5 || warn "A2A no habilitado — hacelo manual"
+import json, re, os, sys
+CFG = os.environ['CONFIG_PATH']
+NEW = os.environ['NEW_AGENTS_PATH']
+def strip_json5(s):
+    s = re.sub(r'//[^\n]*', '', s)
+    s = re.sub(r'/\*.*?\*/', '', s, flags=re.DOTALL)
+    s = re.sub(r'(?<=[{,\s])([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'"\1":', s)
+    s = re.sub(r',(\s*[}\]])', r'\1', s)
+    return s
+if not os.path.exists(CFG):
+    print(f"ERROR: no encuentro config en {CFG}")
+    sys.exit(1)
+with open(CFG,'r',encoding='utf-8') as f:
+    cfg = json.loads(strip_json5(f.read()))
+with open(NEW,'r',encoding='utf-8') as f:
+    new = json.load(f)
+cfg.setdefault('tools', {})
+cfg['tools']['agentToAgent'] = {'enabled': True, 'allow': new['a2a_allow']}
+cfg.setdefault('agents', {}).setdefault('defaults', {})
+d = cfg['agents']['defaults']
+if (d.get('bootstrapMaxChars', 0) or 0) < 16000:
+    d['bootstrapMaxChars'] = 16000
+d.setdefault('bootstrapPromptTruncationWarning', 'once')
+with open(CFG,'w',encoding='utf-8') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+print("A2A_ENABLED")
+PYEOF
+  rm -f "$payload"
+  ok "A2A habilitado (allowlist: $allow_json)"
+}
+
+# =====================================================================
+# ESTRATEGIA FALLBACK: merger Python directo (si openclaw CLI no está)
+# =====================================================================
+write_config_empresa_fallback() {
   local empresa="$1" user_name="$2" areas_list="$3" orch_id="$4"
+  warn "openclaw CLI no está instalado — usando merger Python directo"
+  warn "CUIDADO: si OpenClaw tiene firmas de integridad (meta), puede detectar tampering."
+  warn "Recomendado: instalá openclaw primero (npm install -g openclaw) y re-ejecutá este script."
+
   mkdir -p "$OPENCLAW_HOME"
 
-  # Construir payload con los nuevos agentes (sin model — heredan del default)
-  local new_agents_file
+  local new_agents_file agents_json="" allow_json=""
   new_agents_file="$(mktemp)"
-
-  # Agents list como JSON array
-  local agents_json=""
-  local allow_json=""
 
   local orch_display
   orch_display="$(display_name_for_role "$orch_id") (Orquestador)"
-  agents_json="{\"id\":\"$orch_id\",\"name\":\"$orch_display\",\"default\":true,\"workspace\":\"$OPENCLAW_HOME/workspace\"}"
+  local orch_ws_native
+  orch_ws_native="$(to_windows_path "$OPENCLAW_HOME/workspace")"
+  agents_json="{\"id\":\"$orch_id\",\"name\":\"$orch_display\",\"default\":true,\"workspace\":\"$orch_ws_native\"}"
   allow_json="\"$orch_id\""
 
   IFS=',' read -ra ROLES <<< "$areas_list"
@@ -1058,9 +1211,10 @@ write_config_empresa() {
     role="$(echo "$role" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
     [[ -z "$role" ]] && continue
     [[ "$role" == "$orch_id" ]] && continue
-    local display_name
+    local display_name ws_native
     display_name="$(display_name_for_role "$role")"
-    agents_json="$agents_json,{\"id\":\"$role\",\"name\":\"$display_name\",\"workspace\":\"$OPENCLAW_HOME/workspace-$role\"}"
+    ws_native="$(to_windows_path "$OPENCLAW_HOME/workspace-$role")"
+    agents_json="$agents_json,{\"id\":\"$role\",\"name\":\"$display_name\",\"workspace\":\"$ws_native\"}"
     allow_json="$allow_json,\"$role\""
   done
 
@@ -1073,15 +1227,17 @@ write_config_empresa() {
 EOF
 
   if [[ -n "$PYTHON" ]] && [[ -n "$MERGE_SCRIPT" ]]; then
-    # Modo merge: preserva channels/auth/defaults del config existente
+    local config_native payload_native
+    config_native="$(to_windows_path "$CONFIG_FILE")"
+    payload_native="$(to_windows_path "$new_agents_file")"
+
     local merge_out
     merge_out="$(mktemp)"
-    CONFIG_PATH="$CONFIG_FILE" NEW_AGENTS_PATH="$new_agents_file" \
+    CONFIG_PATH="$config_native" NEW_AGENTS_PATH="$payload_native" \
       "$PYTHON" "$MERGE_SCRIPT" > "$merge_out" 2>&1 || {
         cat "$merge_out" >&2
         die "Falló el merge del config"
       }
-    # Mostrar info relevante del merge
     if grep -q "AUTO_BIND=" "$merge_out"; then
       local bind
       bind="$(grep '^AUTO_BIND=' "$merge_out" | cut -d= -f2-)"
@@ -1092,13 +1248,12 @@ EOF
     return
   fi
 
-  # Fallback: sin Python → escribir config desde cero (avisar)
-  warn "Generando openclaw.json desde cero (sin Python no pude hacer merge)"
-  warn "Si tenías config previa con channels/auth, recuperala desde el backup: $CONFIG_FILE$BACKUP_SUFFIX"
+  # Último fallback: escribir desde cero (AVISO claro)
+  warn "Sin openclaw CLI y sin Python — escribiendo config MÍNIMO desde cero."
+  warn "Perderás channels/auth/defaults previos. Restaura desde: ${CONFIG_FILE}${BACKUP_SUFFIX}"
   cat > "$CONFIG_FILE" <<EOF
 // OpenClaw config — generado por install.sh v$VERSION el $(date +%Y-%m-%d)
 // Empresa: $empresa  |  Responsable: $user_name
-// Modo: multi-agente. Corré \`openclaw setup\` para agregar canal/modelo.
 {
   "agents": {
     "defaults": {
@@ -1117,6 +1272,17 @@ EOF
 }
 EOF
   rm -f "$new_agents_file"
+}
+
+# Función principal: elige la estrategia según el entorno
+write_config_empresa() {
+  local empresa="$1" user_name="$2" areas_list="$3" orch_id="$4"
+
+  if has_openclaw_cli; then
+    register_agents_via_cli "$orch_id" "$areas_list"
+  else
+    write_config_empresa_fallback "$empresa" "$user_name" "$areas_list" "$orch_id"
+  fi
 }
 
 # =====================================================================
