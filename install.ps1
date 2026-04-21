@@ -103,7 +103,16 @@ $REPO_URL = 'https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main
 function Write-Info($m) { Write-Host "[i] $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "[OK] $m" -ForegroundColor Green }
 function Write-Warn($m) { Write-Host "[!] $m" -ForegroundColor Yellow }
-function Die($m)        { Write-Host "[ERROR] $m" -ForegroundColor Red; exit 1 }
+function Die($m) {
+    Write-Host "[ERROR] $m" -ForegroundColor Red
+    # Pausa en ejecucion remota para que el usuario vea el error
+    if (-not $PSScriptRoot -and -not $NonInteractive) {
+        Write-Host ''
+        Write-Host 'Presiona ENTER para cerrar esta ventana...' -ForegroundColor Yellow
+        try { [void][Console]::ReadLine() } catch { Start-Sleep -Seconds 30 }
+    }
+    exit 1
+}
 
 Write-Host ''
 Write-Host "  OpenClaw Workspace Installer v$WRAPPER_VERSION (PowerShell wrapper)" -ForegroundColor Blue
@@ -214,12 +223,33 @@ if ($Force)          { $bashArgs += '--force' }
 Write-Info "Ejecutando: bash $($bashArgs -join ' ')"
 Write-Host ''
 
-& $bashExe $bashArgs
-$exitCode = $LASTEXITCODE
+# Detectar si estamos en ejecucion remota (irm | iex) — en ese caso,
+# pausamos al final para que el usuario pueda ver el output antes de
+# que la ventana se cierre automaticamente.
+$RemoteExec = -not $PSScriptRoot
 
-if ($exitCode -ne 0) {
-    Die "install.sh fallo con exit code $exitCode"
+try {
+    & $bashExe $bashArgs
+    $exitCode = $LASTEXITCODE
+} catch {
+    $exitCode = 1
+    Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
 }
 
 Write-Host ''
-Write-Ok 'Instalacion completada'
+if ($exitCode -eq 0) {
+    Write-Host '[OK] Instalacion completada' -ForegroundColor Green
+} else {
+    Write-Host "[ERROR] install.sh fallo con exit code $exitCode" -ForegroundColor Red
+}
+
+# Pausa SOLO si estamos en ejecucion remota (irm | iex) y la ventana
+# podria cerrarse. Evita perder el output.
+if ($RemoteExec -and -not $NonInteractive) {
+    Write-Host ''
+    Write-Host '─────────────────────────────────────────────' -ForegroundColor DarkGray
+    Write-Host 'Presiona ENTER para cerrar esta ventana...' -ForegroundColor Yellow
+    try { [void][Console]::ReadLine() } catch { Start-Sleep -Seconds 30 }
+}
+
+exit $exitCode
