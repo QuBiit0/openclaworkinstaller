@@ -89,6 +89,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$WRAPPER_VERSION = '2.1.0'
 $REPO_URL = 'https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main'
 
 function Write-Info($m) { Write-Host "[i] $m" -ForegroundColor Cyan }
@@ -97,7 +98,7 @@ function Write-Warn($m) { Write-Host "[!] $m" -ForegroundColor Yellow }
 function Die($m)        { Write-Host "[ERROR] $m" -ForegroundColor Red; exit 1 }
 
 Write-Host ''
-Write-Host '  OpenClaw Workspace Installer (PowerShell wrapper)' -ForegroundColor Blue
+Write-Host "  OpenClaw Workspace Installer v$WRAPPER_VERSION (PowerShell wrapper)" -ForegroundColor Blue
 Write-Host '  delega ejecucion a install.sh via Git Bash' -ForegroundColor DarkGray
 Write-Host ''
 
