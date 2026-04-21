@@ -133,34 +133,81 @@ if ($Mode -and $Mode -notin @('personal', 'empresa')) {
 # 1. Detectar bash.exe (Git Bash o WSL)
 # =====================================================================
 
+function Test-BashWorks($path) {
+    # Verifica que el bash encontrado realmente funciona (no es un stub roto
+    # de WSL sin distro, ni un path que apunta a algo no-ejecutable).
+    if (-not $path -or -not (Test-Path $path)) { return $false }
+    try {
+        $marker = 'OPENCLAW_BASH_OK'
+        $out = & $path -c "echo $marker" 2>&1 | Out-String
+        return ($LASTEXITCODE -eq 0) -and ($out -match $marker)
+    } catch {
+        return $false
+    }
+}
+
 function Find-Bash {
-    # Orden de preferencia
+    # Orden de preferencia — Git Bash primero (es lo que recomendamos)
     $candidates = @(
         'C:\Program Files\Git\bin\bash.exe',
         'C:\Program Files\Git\usr\bin\bash.exe',
-        'C:\Program Files (x86)\Git\bin\bash.exe'
+        'C:\Program Files (x86)\Git\bin\bash.exe',
+        'C:\Program Files (x86)\Git\usr\bin\bash.exe'
     )
     foreach ($c in $candidates) {
-        if (Test-Path $c) { return $c }
+        if (Test-BashWorks $c) {
+            return $c
+        }
     }
+
+    # Fallback: buscar bash en PATH — PERO rechazar el stub de WSL de Windows
+    # Store (C:\Users\...\AppData\Local\Microsoft\WindowsApps\bash.exe) que
+    # falla si WSL no tiene distro instalada.
     $cmd = Get-Command bash -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
+    if ($cmd) {
+        $path = $cmd.Source
+        # El stub de WSL en WindowsApps da "Subsistema de Windows para Linux
+        # no tiene distribuciones instaladas" — saltalo
+        if ($path -match 'WindowsApps\\bash\.exe$' -and -not (Test-BashWorks $path)) {
+            Write-Host "[!] Detectado stub de WSL sin distro: $path (saltado)" -ForegroundColor Yellow
+        } elseif (Test-BashWorks $path) {
+            return $path
+        }
+    }
+
     return $null
 }
 
 $bashExe = Find-Bash
 if (-not $bashExe) {
     Die @'
-No encuentro bash.exe en el sistema.
+No encuentro un bash funcional en esta VM.
 
-Opciones:
-  1) Instalá Git para Windows: https://git-scm.com/download/win
-     (incluye Git Bash que trae bash.exe)
-  2) Habilitá WSL: wsl --install
-  3) Usá directamente el install.sh desde Git Bash / WSL / macOS / Linux
+OPCIONES (elegi UNA):
+
+  1) [RECOMENDADO] Instala Git para Windows (~50MB, 2 min):
+     https://git-scm.com/download/win
+
+     Viene con Git Bash que incluye bash.exe listo para usar.
+     Despues de instalar, cerra y abri PowerShell de nuevo, y corre:
+        irm https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main/install.ps1 | iex
+
+  2) Instala WSL con Ubuntu (mas pesado, requiere reinicio):
+        wsl --install -d Ubuntu
+
+     Despues corre el instalador desde dentro de WSL:
+        curl -fsSL https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main/install.sh | bash
+
+  3) Si ya tenes Git Bash pero no se detecto, verifica donde esta bash:
+        Get-Command bash
+        Test-Path "C:\Program Files\Git\bin\bash.exe"
+
+Nota: detecte que tenes "bash" en PATH pero es el stub de Microsoft Store
+(WSL) que no tiene distro instalada. Ese no sirve — necesitas Git Bash
+o WSL con una distro real.
 '@
 }
-Write-Ok "bash detectado: $bashExe"
+Write-Ok "bash detectado y validado: $bashExe"
 
 # =====================================================================
 # 2. Localizar install.sh — local o descargar del repo
