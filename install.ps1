@@ -66,14 +66,22 @@
         -User "Leandro Álvarez" -Cargo "CEO" -NonInteractive
 
 .EXAMPLE
-    # One-liner remoto (descarga wrapper + install.sh + ejecuta)
+    # One-liner remoto — arranca el wizard INTERACTIVO
     irm https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main/install.ps1 | iex
+
+.EXAMPLE
+    # One-liner remoto con parámetros (requiere ScriptBlock para pasar args)
+    & ([ScriptBlock]::Create((irm https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main/install.ps1))) -Mode empresa -Empresa "OneFix" -Rubro saas -NonInteractive
+
+.EXAMPLE
+    # Alternativa: descargar primero y correr con params
+    iwr https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main/install.ps1 -OutFile install.ps1
+    .\install.ps1 -Mode empresa -Empresa "OneFix" -NonInteractive
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('personal', 'empresa')]
-    [string]$Mode,
+    [string]$Mode = '',
     [string]$Empresa,
     [string]$Rubro,
     [string]$Areas,
@@ -105,6 +113,11 @@ Write-Host ''
 if ($Help) {
     Get-Help $PSCommandPath -Detailed
     exit 0
+}
+
+# Validar Mode si vino con valor (permitir vacío para que el wizard lo pregunte)
+if ($Mode -and $Mode -notin @('personal', 'empresa')) {
+    Die "Mode debe ser 'personal' o 'empresa' (recibido: '$Mode')"
 }
 
 # =====================================================================
