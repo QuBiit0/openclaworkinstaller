@@ -28,7 +28,7 @@ set -euo pipefail
 # CONFIG
 # =====================================================================
 
-VERSION="2.3.0"
+VERSION="2.3.1"
 # Cuando el script se baja con curl | bash, BASH_SOURCE puede no existir (se lee de stdin)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
 TEMPLATES_DIR=""

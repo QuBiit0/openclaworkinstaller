@@ -3,7 +3,7 @@
 Scaffold de workspaces OpenClaw con plantillas optimizadas en español.
 Extiende tu OpenClaw ya instalado para operar en modo **multi-agente empresa** o como **asistente personal**.
 
-**v2.3.0** — Merge inteligente con tu `openclaw.json` existente. Cero fricción.
+**v2.3.1** — Merge inteligente con tu `openclaw.json` existente. Cero fricción.
 
 ---
 
@@ -284,7 +284,7 @@ openclaw agent --agent <orch_id> --message "Presentate y listá tu equipo"
 
 ## Versión
 
-- Installer: **v2.3.0**
+- Installer: **v2.3.1**
 - Compatible con OpenClaw: **2026.4.23+**
 - Plantillas respetan límites oficiales: `bootstrapMaxChars: 16000` por archivo (auto-setea), `bootstrapTotalMaxChars: 60000` total.
 

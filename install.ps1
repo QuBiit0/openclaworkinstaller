@@ -97,7 +97,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$WRAPPER_VERSION = '2.3.0'
+$WRAPPER_VERSION = '2.3.1'
 $REPO_URL = 'https://raw.githubusercontent.com/QuBiit0/openclaworkinstaller/main'
 
 function Write-Info($m) { Write-Host "[i] $m" -ForegroundColor Cyan }

@@ -6,6 +6,20 @@ Format: `[version] — YYYY-MM-DD` / sections: Fixed · Added · Changed
 
 ---
 
+## [2.3.1] — 2026-04-25
+
+### Fixed
+
+- **H1** — `tests/smoke/bf-5-orch-id-sanitize.sh` scenario D (uppercase `MAIN`) usaba un patrón regex que no matcheaba el mensaje real de `sanitize_orchestrator_id` ("`ID 'main' está reservado`"). Patrón corregido a `reservado\|reserved`.
+- **H2** — BF-5 C1 fix (`--orchestrator-id ""` en `--non-interactive`) solo aplicaba dentro del bloque `mode == empresa`. Movido a nivel module post-arg-parser → ahora cubre TODOS los modos (spec literal: "in non-interactive mode").
+- **H3** — CHANGELOG v2.3.0 describía SP-2 como "subagents keys en Python heredoc". El spec real define SP-2 como el version gate (CLI 2026.4.23+). Descripción reescrita para alinearse al spec.
+- **M1** — `doctor_exit=$?` en `post_install_smoke_test` era código muerto (`run_check` siempre retorna 0). Removido + comentario explicando que la detección PASS/FAIL por keywords es deferred-to-v2.4 (W2).
+- **M3** — Mensaje WARN para set-identity con flag vacío imprimía `"set-identity  no detectado"` (doble espacio, sin flag). Hardcodeado a `"(--name|--display-name|--label)"`.
+- **M4** — `HAS_SUBAGENTS_POLICY` era derivado pero nunca consultado (write_subagents_policy_empresa lee `HAS_CONFIG_PATCH` directo + `cli_version_gte`). Variable eliminada.
+- **M5** — Pasar `--orchestrator-id` SIN valor (último arg) abortaba con `unbound variable` por `set -u`. Validación explícita: `--orchestrator-id requiere un valor (puede estar vacío con: --orchestrator-id "")`.
+
+---
+
 ## [2.3.0] — 2026-04-25
 
 ### Fixed
