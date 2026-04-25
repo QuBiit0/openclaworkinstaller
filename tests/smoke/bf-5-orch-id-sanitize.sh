@@ -77,15 +77,16 @@ run_scenario() {
 # A: empty orchestrator-id → should fail with "orchestrator-id" in output
 run_scenario "empty-id"   "yes" "orchestrator-id" --orchestrator-id ""
 
-# B: reserved id "main" passed via flag — behaviour depends on impl:
-# if main is treated as valid bypass, test that. If rejected, check exit 1.
-# Per design D8, "main" is reserved and should be rejected.
-run_scenario "reserved-main" "yes" "orchestrator-id\|reserved\|main" --orchestrator-id "main"
+# B: reserved id "main" passed via flag → die() con mensaje "ID 'main' está reservado"
+run_scenario "reserved-main" "yes" "reservado\|reserved\|main" --orchestrator-id "main"
 
 # C: valid id "ceo" → should succeed
 run_scenario "valid-ceo"  "no"  "" --orchestrator-id "ceo"
 
-# D: uppercase "MAIN" → should fail (regex ^[a-z]... enforced)
-run_scenario "uppercase-MAIN" "yes" "orchestrator-id\|invalid\|lowercase" --orchestrator-id "MAIN"
+# D: uppercase "MAIN" → sanitize() lo lowercasea → "main" → die() con "reservado"
+# (no "lowercase" en el mensaje porque el sanitize lo aceptó como lowercase válido y luego
+# falló por reserved). Si en algún momento agregamos validación pre-lowercase, este patrón
+# debe expandirse a "reservado\|invalid\|lowercase".
+run_scenario "uppercase-MAIN" "yes" "reservado\|reserved" --orchestrator-id "MAIN"
 
 exit $overall

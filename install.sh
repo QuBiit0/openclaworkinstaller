@@ -42,9 +42,8 @@ BACKUP_SUFFIX=".bak-$(date +%Y%m%d-%H%M%S)"
 # Feature flags — poblados por detect_openclaw_features() en check_requirements
 # Inicializados en 0 para que should_use_legacy_merger() sea seguro de llamar antes
 HAS_OPENCLAW_META="0"
-HAS_SET_IDENTITY_NAME=0   # openclaw agents set-identity soporta --name
+HAS_SET_IDENTITY_NAME=0   # openclaw agents set-identity soporta uno de los flags de display name
 HAS_CONFIG_PATCH=0        # openclaw config soporta subcomando 'patch'
-HAS_SUBAGENTS_POLICY=0    # CLI es suficientemente nuevo para subagents policy
 SET_IDENTITY_NAME_FLAG="" # flag real detectado: --name | --display-name | --label | ""
 
 # CLI args
@@ -150,7 +149,10 @@ while [[ $# -gt 0 ]]; do
     --areas)              ARG_AREAS="$2"; shift 2 ;;
     --user)               ARG_USER="$2"; shift 2 ;;
     --cargo)              ARG_CARGO="$2"; shift 2 ;;
-    --orchestrator-id)    ARG_ORCH_ID="$2"; ARG_ORCH_ID_SET="true"; shift 2 ;;
+    --orchestrator-id)
+      [[ $# -ge 2 ]] || die "--orchestrator-id requiere un valor (puede estar vacío con: --orchestrator-id \"\")"
+      ARG_ORCH_ID="$2"; ARG_ORCH_ID_SET="true"; shift 2
+      ;;
     --templates-dir)      TEMPLATES_DIR="$2"; shift 2 ;;
     --templates-url)      TEMPLATES_URL="$2"; shift 2 ;;
     --home)               OPENCLAW_HOME="$2"; CONFIG_FILE="$OPENCLAW_HOME/openclaw.json"; shift 2 ;;
@@ -220,6 +222,14 @@ EOF
       ;;
   esac
 done
+
+# BF-5 (C1 fix): validar --orchestrator-id explícitamente vacío en modo --non-interactive.
+# Lo hacemos acá (post-arg-parser) y NO dentro del wizard porque el spec aplica
+# independientemente del modo (personal o empresa). En modo interactivo el wizard
+# re-pregunta, así que solo enforced en --non-interactive.
+if [[ "$ARG_ORCH_ID_SET" == "true" && -z "$ARG_ORCH_ID" && "$ARG_NON_INTERACTIVE" == "true" ]]; then
+  die "Error: --orchestrator-id no puede estar vacío en modo --non-interactive. Usá: --orchestrator-id <id> (ej: gerencia, ceo, director)"
+fi
 
 # =====================================================================
 # CHECKS
@@ -332,7 +342,7 @@ check_requirements() {
 }
 
 # Detecta qué features opcionales tiene la versión instalada del CLI.
-# Exporta: HAS_SET_IDENTITY_NAME, HAS_CONFIG_PATCH, HAS_SUBAGENTS_POLICY,
+# Exporta: HAS_SET_IDENTITY_NAME, HAS_CONFIG_PATCH,
 #          SET_IDENTITY_NAME_FLAG (el nombre exacto del flag para set-identity).
 # Se llama UNA VEZ desde check_requirements; seguro de llamar aunque CLI no esté.
 detect_openclaw_features() {
@@ -356,17 +366,12 @@ detect_openclaw_features() {
     HAS_CONFIG_PATCH=1
   fi
 
-  # --- subagents policy (D6) ---
-  # Asumimos disponible en cualquier build que tenga config patch (2026.4.23+).
-  # No hay --help probe específico; se usa cli_version_gte como segunda barrera en write_subagents_policy_empresa.
-  if [[ "$HAS_CONFIG_PATCH" == "1" ]]; then
-    HAS_SUBAGENTS_POLICY=1
-  fi
+  # NOTA: subagents policy (D6) NO tiene un --help probe específico; el gate vive
+  # directamente en write_subagents_policy_empresa() vía cli_version_gte 2026.4.23
+  # + HAS_CONFIG_PATCH. No persistimos un HAS_SUBAGENTS_POLICY redundante.
 
   # Loguear resultados para troubleshooting
-  info "Feature flags del CLI: HAS_SET_IDENTITY_NAME=$HAS_SET_IDENTITY_NAME" \
-       "(${SET_IDENTITY_NAME_FLAG:-none}) HAS_CONFIG_PATCH=$HAS_CONFIG_PATCH" \
-       "HAS_SUBAGENTS_POLICY=$HAS_SUBAGENTS_POLICY"
+  info "Feature flags CLI: set-identity=${SET_IDENTITY_NAME_FLAG:-none}, config-patch=$HAS_CONFIG_PATCH"
 }
 
 # =====================================================================
@@ -711,11 +716,8 @@ run_wizard() {
       empresa=$(ask "Nombre de la empresa" "Mi Empresa")
     fi
 
-    # ID del agente principal (orquestador) — BF-5: validar en AMBAS ramas (interactiva y no)
-    # BF-5 C1 fix: rechazar --orchestrator-id "" explícito en modo --non-interactive
-    if [[ "$ARG_ORCH_ID_SET" == "true" && -z "$ARG_ORCH_ID" && "$ARG_NON_INTERACTIVE" == "true" ]]; then
-      die "Error: --orchestrator-id no puede estar vacío en modo --non-interactive. Usá: --orchestrator-id <id> (ej: gerencia, ceo, director)"
-    fi
+    # ID del agente principal (orquestador). BF-5 C1 (--orchestrator-id "" en --non-interactive)
+    # ya fue validado a nivel module después del arg parser.
     if [[ -n "$ARG_ORCH_ID" ]]; then
       # --orchestrator-id provisto: sanitize_orchestrator_id hace die() si es inválido
       orch_id="$(sanitize_orchestrator_id "$ARG_ORCH_ID")"
@@ -1309,7 +1311,7 @@ register_agents_via_cli() {
           --workspace "$ws_native" --non-interactive >/dev/null 2>&1 \
           || warn "set-identity para '$role' falló — display name derivará del id"
       else
-        warn "set-identity $SET_IDENTITY_NAME_FLAG no detectado — display name de '$role' derivará del id"
+        warn "set-identity (--name|--display-name|--label) no detectado en CLI — display name de '$role' derivará del id"
       fi
     else
       # Puede fallar si ya existe — probar actualización de identidad
@@ -1705,10 +1707,11 @@ post_install_smoke_test() {
   # ------------------------------------------------------------------
   # Check 1: openclaw doctor (10 segundos) — verifica integridad firma
   # ------------------------------------------------------------------
-  local doctor_out doctor_exit=0
+  # NOTA (W2 deferred a v2.4): la detección de PASS/FAIL es por keywords del output
+  # (no por exit code) porque run_check absorbe el exit code para no propagar fallos
+  # del timeout. Mejorar a detección por exit code en v2.4.
+  local doctor_out
   doctor_out="$(run_check "doctor" "openclaw doctor" 10)"
-  doctor_exit=$?  # run_check siempre retorna 0 — capturar via subshell exit no aplica
-  # Detectar timeout: run_check absorbe el exit code, pero el output estaría vacío o truncado
   if [[ -z "$doctor_out" ]]; then
     _smoke_warn "doctor: sin respuesta en 10s (timeout o CLI no instalado)"
   elif echo "$doctor_out" | grep -qi "signature\|tampering\|corrupt\|error"; then

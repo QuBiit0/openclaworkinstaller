@@ -19,13 +19,13 @@ Format: `[version] — YYYY-MM-DD` / sections: Fixed · Added · Changed
 
 ### Added
 
-- **SP-1** — `write_subagents_policy_empresa()` helper: applies subagents defaults via `openclaw config patch --merge` on CLI path (2026.4.23+); extends Python MERGE_SCRIPT heredoc on fallback path; no-op in personal mode.
-- **SP-2** — Subagents policy keys included in Python merger heredoc (`MERGE_SCRIPT`) when `WIZARD_MODE=empresa`, ensuring legacy installs also get the policy defaults.
-- **ST-1** — Post-install smoke test (`post_install_smoke_test`): runs `openclaw doctor`, `openclaw agents list`, and binding check after install. Output: `[PASS|WARN|FAIL] <check>: <detail>`. Non-blocking — installer always exits 0 regardless of smoke test result.
-- **ST-2** — Smoke test aggregation banner: "All checks passed", "Some checks need attention", or "Post-install checks failed" depending on aggregated result.
-- `tests/smoke/` — Maintainer-runnable regression scripts (6 per-BF scripts + umbrella runner). No bats dependency. Plain bash, exit 0 on PASS.
-- Feature flag detection (`detect_openclaw_features`): probes `openclaw --help` to set `HAS_SET_IDENTITY_NAME`, `HAS_CONFIG_PATCH`, `HAS_SUBAGENTS_POLICY`, `SET_IDENTITY_NAME_FLAG`.
-- Legacy merger gate (`should_use_legacy_merger`): skips Python merger when CLI is present and meta file exists.
+- **SP-1** — `write_subagents_policy_empresa()` helper: aplica los tres defaults requeridos (`maxSpawnDepth=2`, `maxChildrenPerAgent=5`, `tools.subagents.tools.deny=["gateway","cron"]`) via `openclaw config patch --merge` en path CLI; extiende el Python MERGE_SCRIPT en path fallback; no-op en modo personal.
+- **SP-2** — Gate de versión: la subagents policy solo se escribe si `cli_version_gte 2026.4.23` retorna true. CLIs anteriores reciben WARN explícito ("subagents policy skipped — versión detectada no soporta config patch --merge") y la instalación continúa sin la política.
+- **ST-1** — Smoke test post-instalación (`post_install_smoke_test`): corre `openclaw doctor` (10s timeout), `openclaw agents list` (5s) y bindings check (5s, solo empresa). Output formato `[PASS|WARN|FAIL] <check>: <detail>`. **No bloqueante** — el installer siempre termina con exit 0.
+- **ST-2** — Banner agregado: `[✓]` (verde, todo OK), `[⚠]` (amarillo, warnings), `[✗]` (rojo, fallos críticos), según el peor resultado observado entre los checks.
+- `tests/smoke/` — Scripts de regresión runnable por maintainers (6 scripts por-BF + umbrella runner). Sin dependencia de bats. Plain bash, exit 0 = PASS.
+- Feature flag detection (`detect_openclaw_features`): probea `openclaw <subcmd> --help` para setear `HAS_SET_IDENTITY_NAME`, `HAS_CONFIG_PATCH`, `SET_IDENTITY_NAME_FLAG` (probe 3-flag: `--name` → `--display-name` → `--label`).
+- Legacy merger gate (`should_use_legacy_merger`): salta el Python merger cuando hay CLI presente Y el config tiene `meta` (firma de integridad).
 
 ### Changed
 
