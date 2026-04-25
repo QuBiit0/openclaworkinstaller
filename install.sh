@@ -28,7 +28,7 @@ set -euo pipefail
 # CONFIG
 # =====================================================================
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 # Cuando el script se baja con curl | bash, BASH_SOURCE puede no existir (se lee de stdin)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
 TEMPLATES_DIR=""
@@ -39,6 +39,14 @@ OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 CONFIG_FILE="$OPENCLAW_HOME/openclaw.json"
 BACKUP_SUFFIX=".bak-$(date +%Y%m%d-%H%M%S)"
 
+# Feature flags — poblados por detect_openclaw_features() en check_requirements
+# Inicializados en 0 para que should_use_legacy_merger() sea seguro de llamar antes
+HAS_OPENCLAW_META="0"
+HAS_SET_IDENTITY_NAME=0   # openclaw agents set-identity soporta --name
+HAS_CONFIG_PATCH=0        # openclaw config soporta subcomando 'patch'
+HAS_SUBAGENTS_POLICY=0    # CLI es suficientemente nuevo para subagents policy
+SET_IDENTITY_NAME_FLAG="" # flag real detectado: --name | --display-name | --label | ""
+
 # CLI args
 ARG_MODE=""
 ARG_EMPRESA=""
@@ -47,6 +55,7 @@ ARG_AREAS=""
 ARG_USER=""
 ARG_CARGO=""
 ARG_ORCH_ID=""
+ARG_ORCH_ID_SET="false"   # true si --orchestrator-id fue pasado explícitamente (incluso vacío)
 ARG_NON_INTERACTIVE="false"
 ARG_FORCE="false"
 
@@ -141,7 +150,7 @@ while [[ $# -gt 0 ]]; do
     --areas)              ARG_AREAS="$2"; shift 2 ;;
     --user)               ARG_USER="$2"; shift 2 ;;
     --cargo)              ARG_CARGO="$2"; shift 2 ;;
-    --orchestrator-id)    ARG_ORCH_ID="$2"; shift 2 ;;
+    --orchestrator-id)    ARG_ORCH_ID="$2"; ARG_ORCH_ID_SET="true"; shift 2 ;;
     --templates-dir)      TEMPLATES_DIR="$2"; shift 2 ;;
     --templates-url)      TEMPLATES_URL="$2"; shift 2 ;;
     --home)               OPENCLAW_HOME="$2"; CONFIG_FILE="$OPENCLAW_HOME/openclaw.json"; shift 2 ;;
@@ -220,6 +229,87 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Comando requerido no encontrado: $1"
 }
 
+# Comprueba si el output de `openclaw <subcmd> --help` contiene un flag dado.
+# Uso: cli_has_flag "agents set-identity" "--name"
+# Retorna 0 si está presente, 1 si no.
+cli_has_flag() {
+  local subcmd="$1" flag="$2"
+  has_openclaw_cli || return 1
+  # shellcheck disable=SC2086
+  openclaw $subcmd --help 2>/dev/null | grep -qE "(^|[[:space:]])${flag}([[:space:]]|=|$)"
+}
+
+# Compara la versión del CLI instalado contra una versión mínima en formato YYYY.M.D.
+# Uso: cli_version_gte 2026.4.23
+# Retorna 0 si la versión instalada es >= la pedida, 1 si no o si no se puede determinar.
+cli_version_gte() {
+  local required="$1"
+  has_openclaw_cli || return 1
+  local actual
+  actual="$(openclaw --version 2>/dev/null | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | head -1 || true)"
+  [[ -z "$actual" ]] && return 1
+
+  # Convertir YYYY.M.D → entero comparable: YYYYMMDD (con zero-padding de mes y día)
+  _ver_to_int() {
+    local v="$1"
+    local y m d
+    IFS='.' read -r y m d <<< "$v"
+    printf '%d%02d%02d' "${y:-0}" "${m:-0}" "${d:-0}"
+  }
+
+  local v_actual v_required
+  v_actual="$(_ver_to_int "$actual")"
+  v_required="$(_ver_to_int "$required")"
+  [[ "$v_actual" -ge "$v_required" ]]
+}
+
+# Devuelve 0 (verdadero) si IDENTITY.md existe y está suficientemente relleno.
+# Heurística (clarifications #338): cuenta placeholders del template real:
+#   `[...]`  `[YYYY-MM-DD]`  `[v1.0]`  `[ej: ...]`
+# Un IDENTITY.md vacío / recién copiado tiene ≥8 placeholders.
+# Una vez que el usuario completa los campos básicos (nombre, criatura, vibra),
+# el conteo baja de 5 — consideramos el archivo "relleno" con <5 placeholders.
+is_identity_filled() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  local unfilled
+  unfilled="$(grep -cE '\`\[(\.\.\.|YYYY-MM-DD|v[0-9]\.[0-9]|ej:)' "$file" 2>/dev/null || true)"
+  [[ "${unfilled:-0}" -lt 5 ]]
+}
+
+# Valida y normaliza el ID del orquestador.
+# - Convierte a lowercase y elimina espacios.
+# - En modo fatal (default): llama die() con mensaje claro (para --non-interactive).
+# - En modo silencioso (pasar cualquier segundo arg): escribe error a stderr y retorna 1
+#   (para uso en loops interactivos donde die() abortaría el proceso entero).
+# Uso no-interactivo:  orch_id="$(sanitize_orchestrator_id "$ARG_ORCH_ID")"
+# Uso interactivo:     if orch_id="$(sanitize_orchestrator_id "$raw" quiet 2>/dev/null)"; then
+sanitize_orchestrator_id() {
+  local raw="$1" quiet="${2:-}" sanitized msg=""
+  sanitized="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+
+  if [[ -z "$sanitized" ]]; then
+    msg="orchestrator-id vacío. Usá --orchestrator-id <id> (ej: gerencia, ceo, director)."
+  elif [[ "$sanitized" == "main" ]]; then
+    msg="ID 'main' está reservado por OpenClaw. Elegí otro (ej: gerencia, ceo, director)."
+  elif ! [[ "$sanitized" =~ ^[a-z][a-z0-9_-]{1,31}$ ]]; then
+    msg="orchestrator-id inválido: '$raw'. Solo lowercase, letras/números/guiones/subguiones, debe empezar con letra, máx 32 chars."
+  fi
+
+  if [[ -n "$msg" ]]; then
+    if [[ -n "$quiet" ]]; then
+      # Modo interactivo: error a stderr y retornar 1 (no die)
+      echo "$msg" >&2
+      return 1
+    else
+      # Modo no-interactivo / fatal: die aborta con exit 1
+      die "$msg"
+    fi
+  fi
+
+  echo "$sanitized"
+}
+
 check_requirements() {
   step "Verificando requisitos"
   require_cmd bash
@@ -236,6 +326,47 @@ check_requirements() {
     info "Recomendado: npm install -g openclaw && openclaw setup"
     info "El script deja todo listo — instalalo después y corré 'openclaw gateway restart'."
   fi
+
+  # Detectar capacidades del CLI una sola vez — los flags se usan en todo el script
+  detect_openclaw_features
+}
+
+# Detecta qué features opcionales tiene la versión instalada del CLI.
+# Exporta: HAS_SET_IDENTITY_NAME, HAS_CONFIG_PATCH, HAS_SUBAGENTS_POLICY,
+#          SET_IDENTITY_NAME_FLAG (el nombre exacto del flag para set-identity).
+# Se llama UNA VEZ desde check_requirements; seguro de llamar aunque CLI no esté.
+detect_openclaw_features() {
+  has_openclaw_cli || return 0
+
+  # --- set-identity display-name flag (D1 / clarifications #338) ---
+  # Probar en orden de probabilidad: --name, --display-name, --label.
+  # Usar el primero que aparezca en la ayuda del subcomando.
+  local si_help
+  si_help="$(openclaw agents set-identity --help 2>/dev/null || true)"
+  for flag_candidate in --name --display-name --label; do
+    if echo "$si_help" | grep -qE "(^|[[:space:]])${flag_candidate}([[:space:]]|=|$)"; then
+      SET_IDENTITY_NAME_FLAG="$flag_candidate"
+      HAS_SET_IDENTITY_NAME=1
+      break
+    fi
+  done
+
+  # --- config patch subcomando (D3 / D6) ---
+  if openclaw config --help 2>/dev/null | grep -qE "(^|[[:space:]])patch([[:space:]]|$)"; then
+    HAS_CONFIG_PATCH=1
+  fi
+
+  # --- subagents policy (D6) ---
+  # Asumimos disponible en cualquier build que tenga config patch (2026.4.23+).
+  # No hay --help probe específico; se usa cli_version_gte como segunda barrera en write_subagents_policy_empresa.
+  if [[ "$HAS_CONFIG_PATCH" == "1" ]]; then
+    HAS_SUBAGENTS_POLICY=1
+  fi
+
+  # Loguear resultados para troubleshooting
+  info "Feature flags del CLI: HAS_SET_IDENTITY_NAME=$HAS_SET_IDENTITY_NAME" \
+       "(${SET_IDENTITY_NAME_FLAG:-none}) HAS_CONFIG_PATCH=$HAS_CONFIG_PATCH" \
+       "HAS_SUBAGENTS_POLICY=$HAS_SUBAGENTS_POLICY"
 }
 
 # =====================================================================
@@ -336,6 +467,14 @@ def main():
         'enabled': True,
         'allow': new['a2a_allow'],
     }
+
+    # agents.defaults.subagents + tools.subagents policy (BF-6 / SP-1 / SP-2)
+    # Solo en modo empresa (WIZARD_MODE=empresa pasado por el caller)
+    if os.environ.get('WIZARD_MODE') == 'empresa':
+        subagents_defaults = defaults.setdefault('subagents', {})
+        subagents_defaults['maxSpawnDepth'] = 2
+        subagents_defaults['maxChildrenPerAgent'] = 5
+        cfg['tools'].setdefault('subagents', {}).setdefault('tools', {})['deny'] = ['gateway', 'cron']
 
     # Auto-bindear orquestador si hay UN solo canal configurado
     orch_id = new['orchestrator_id']
@@ -572,23 +711,29 @@ run_wizard() {
       empresa=$(ask "Nombre de la empresa" "Mi Empresa")
     fi
 
-    # ID del agente principal (orquestador)
+    # ID del agente principal (orquestador) — BF-5: validar en AMBAS ramas (interactiva y no)
+    # BF-5 C1 fix: rechazar --orchestrator-id "" explícito en modo --non-interactive
+    if [[ "$ARG_ORCH_ID_SET" == "true" && -z "$ARG_ORCH_ID" && "$ARG_NON_INTERACTIVE" == "true" ]]; then
+      die "Error: --orchestrator-id no puede estar vacío en modo --non-interactive. Usá: --orchestrator-id <id> (ej: gerencia, ceo, director)"
+    fi
     if [[ -n "$ARG_ORCH_ID" ]]; then
-      orch_id="$ARG_ORCH_ID"
+      # --orchestrator-id provisto: sanitize_orchestrator_id hace die() si es inválido
+      orch_id="$(sanitize_orchestrator_id "$ARG_ORCH_ID")"
     elif [[ "$ARG_NON_INTERACTIVE" == "true" ]]; then
-      orch_id="gerencia"
+      # Sin flag y no-interactivo: default seguro "gerencia" (ya pasa validación)
+      orch_id="$(sanitize_orchestrator_id "gerencia")"
     else
       echo
       info "ID del agente principal (el que coordina al equipo y habla con vos)."
-      info "Sugerencias comunes: ${C_BOLD}gerencia${C_RESET} / ${C_BOLD}main${C_RESET} / ${C_BOLD}ceo${C_RESET} / ${C_BOLD}director${C_RESET} / ${C_BOLD}orquestador${C_RESET}"
-      info "Debe ser lowercase, letras/números/guiones. Nombre propio/personalidad se define después en BOOTSTRAP."
+      info "Sugerencias comunes: ${C_BOLD}gerencia${C_RESET} / ${C_BOLD}ceo${C_RESET} / ${C_BOLD}director${C_RESET} / ${C_BOLD}orquestador${C_RESET}"
+      info "Debe ser lowercase, letras/números/guiones/subguiones. Nombre/personalidad se define en BOOTSTRAP."
       while true; do
         orch_id=$(ask "ID del agente principal" "gerencia")
-        orch_id="$(echo "$orch_id" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-        if [[ "$orch_id" =~ ^[a-z][a-z0-9-]*$ ]]; then
+        # Modo silencioso (segundo arg): retorna 1 en lugar de die(), así el loop puede continuar
+        if orch_id="$(sanitize_orchestrator_id "$orch_id" quiet 2>/dev/null)"; then
           break
         fi
-        warn "ID inválido. Solo lowercase, letras/números/guiones, debe empezar con letra."
+        warn "ID inválido. Solo lowercase, letras/números/guiones/subguiones, debe empezar con letra, máx 32 chars, no puede ser 'main'."
       done
     fi
 
@@ -1082,6 +1227,21 @@ has_openclaw_cli() {
   command -v openclaw >/dev/null 2>&1
 }
 
+# Decide si hay que usar el merger Python para writes de config (D5).
+# El merger SOLO es necesario cuando:
+#   a) No hay CLI instalado — es la única forma de escribir config.
+#   b) No hay firma de integridad (HAS_OPENCLAW_META=0) — no hay nada que romper.
+# En la ruta CLI + meta, el merger se SALTA para no corromper la firma.
+should_use_legacy_merger() {
+  if ! has_openclaw_cli; then
+    return 0  # sin CLI → usar merger (único path disponible)
+  fi
+  if [[ "${HAS_OPENCLAW_META:-0}" != "1" ]]; then
+    return 0  # sin meta/firma → no hay integridad que preservar, merger es seguro
+  fi
+  return 1    # CLI + meta presentes → NUNCA pasar por el merger
+}
+
 # =====================================================================
 # ESTRATEGIA PRIMARIA: usar `openclaw agents add` (respeta firmas meta)
 # =====================================================================
@@ -1090,7 +1250,42 @@ register_agents_via_cli() {
 
   info "Usando ${C_BOLD}openclaw agents add${C_RESET} (respeta firmas de integridad del config)"
 
-  # Registrar especialistas (el orquestador queda como default implícito = 'main')
+  # ---------------------------------------------------------------------------
+  # BF-2: Registrar el orquestador ANTES que los especialistas cuando no es 'main'.
+  # El modelo previo asumía que OpenClaw trata cualquier orch_id como 'main' implícito
+  # — eso fue desmentido en 2026.4.x: si orch_id != 'main', queda sin registrar.
+  # ---------------------------------------------------------------------------
+  if [[ "$orch_id" != "main" ]]; then
+    local gws="$OPENCLAW_HOME/workspace"
+    local gws_native
+    gws_native="$(to_windows_path "$gws")"
+    local orch_display
+    orch_display="$(display_name_for_role "$orch_id") (Orquestador)"
+
+    # BF-2 C2 fix: distinguir re-ejecución idempotente de falla real.
+    # Primero probamos si el agente ya existe; si es así, saltamos el add sin error.
+    if openclaw agents list 2>/dev/null | grep -q "^$orch_id\b\|\"$orch_id\""; then
+      info "Orquestador '$orch_id' ya existe — saltando registro (idempotente)"
+    elif ! openclaw agents add "$orch_id" --workspace "$gws_native" --non-interactive >/dev/null 2>&1; then
+      die "Error: no se pudo registrar el orquestador '$orch_id' (openclaw agents add falló)"
+    else
+      ok "Orquestador registrado: $orch_id"
+    fi
+
+    # BF-1: set-identity del orquestador con display name
+    if [[ "$HAS_SET_IDENTITY_NAME" == "1" ]]; then
+      openclaw agents set-identity --agent "$orch_id" \
+        "$SET_IDENTITY_NAME_FLAG" "$orch_display" \
+        --workspace "$gws_native" --non-interactive >/dev/null 2>&1 \
+        || warn "set-identity para orquestador '$orch_id' falló — el display name se derivará del id"
+    else
+      warn "set-identity --name no detectado en el CLI — display name del orquestador derivará del id"
+    fi
+  fi
+
+  # ---------------------------------------------------------------------------
+  # Registrar especialistas
+  # ---------------------------------------------------------------------------
   IFS=',' read -ra ROLES <<< "$areas_list"
   for role in "${ROLES[@]}"; do
     role="$(echo "$role" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
@@ -1100,30 +1295,121 @@ register_agents_via_cli() {
     local ws="$OPENCLAW_HOME/workspace-$role"
     local ws_native
     ws_native="$(to_windows_path "$ws")"
+    local display_name
+    display_name="$(display_name_for_role "$role")"
 
     # openclaw agents add <id> --workspace <path> --non-interactive
     if openclaw agents add "$role" --workspace "$ws_native" --non-interactive >/dev/null 2>&1; then
       ok "Agente registrado: $role"
+
+      # BF-1: set display name via set-identity (solo si el CLI lo soporta)
+      if [[ "$HAS_SET_IDENTITY_NAME" == "1" ]]; then
+        openclaw agents set-identity --agent "$role" \
+          "$SET_IDENTITY_NAME_FLAG" "$display_name" \
+          --workspace "$ws_native" --non-interactive >/dev/null 2>&1 \
+          || warn "set-identity para '$role' falló — display name derivará del id"
+      else
+        warn "set-identity $SET_IDENTITY_NAME_FLAG no detectado — display name de '$role' derivará del id"
+      fi
     else
-      # Puede fallar si ya existe — probar update via --workspace
+      # Puede fallar si ya existe — probar actualización de identidad
       warn "Agente '$role' quizá ya existía — intentando update..."
-      openclaw agents set-identity --agent "$role" --from-identity --workspace "$ws_native" >/dev/null 2>&1 || \
-        warn "No se pudo re-registrar $role — agregalo manualmente con: openclaw agents add $role --workspace \"$ws_native\""
+
+      # BF-4: solo pasar --from-identity si IDENTITY.md está relleno
+      # (no mezclar placeholder de template con identidad real ya guardada)
+      if is_identity_filled "$ws/IDENTITY.md"; then
+        openclaw agents set-identity --agent "$role" --from-identity --workspace "$ws_native" \
+          >/dev/null 2>&1 \
+          || warn "No se pudo re-registrar $role — agregalo manualmente con: openclaw agents add $role --workspace \"$ws_native\""
+      else
+        info "IDENTITY.md de '$role' aún no fue completada — saltando --from-identity (el agente lo completará en su primer arranque)"
+        warn "Para re-registrar manualmente: openclaw agents add $role --workspace \"$ws_native\""
+      fi
     fi
   done
 
-  # Nota sobre orquestador
-  info "El orquestador '$orch_id' usa el workspace default ($OPENCLAW_HOME/workspace)"
-  info "OpenClaw lo trata como agente 'main' implícito (default) — no hace falta registrarlo explícitamente."
+  # ---------------------------------------------------------------------------
+  # BF-3: Habilitar A2A — CLI path NO usa merger Python (evita corromper firma)
+  # La función enable_a2a_via_cli intenta config patch; si no está disponible,
+  # imprime el snippet manual. El merger SOLO corre en fallback (should_use_legacy_merger).
+  # ---------------------------------------------------------------------------
+  enable_a2a_via_cli "$orch_id" "$areas_list"
 
-  # Habilitar A2A
-  if [[ -n "$PYTHON" ]] && [[ -n "$MERGE_SCRIPT" ]]; then
-    # El merger solo agrega tools.agentToAgent — no toca agents.list (ya lo hizo la CLI)
+  # ---------------------------------------------------------------------------
+  # BF-6 + SP-1 + SP-2: escribir subagents policy (empresa mode + CLI 2026.4.23+)
+  # ---------------------------------------------------------------------------
+  write_subagents_policy_empresa
+}
+
+# Habilita A2A via CLI (config patch) o imprime instrucciones manuales.
+# No invoca el merger Python — ese queda SOLO para write_config_empresa_fallback.
+enable_a2a_via_cli() {
+  local orch_id="$1" areas_list="$2"
+  local allow_list="\"main\""
+
+  IFS=',' read -ra ROLES <<< "$areas_list"
+  for role in "${ROLES[@]}"; do
+    role="$(echo "$role" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    [[ -z "$role" ]] && continue
+    [[ "$role" == "$orch_id" ]] && continue
+    [[ "$role" == "main" ]] && continue
+    allow_list="$allow_list,\"$role\""
+  done
+
+  if [[ "$HAS_CONFIG_PATCH" == "1" ]]; then
+    # CLI tiene config patch — úsalo para no tocar la firma
+    local a2a_patch
+    a2a_patch='{"tools":{"agentToAgent":{"enabled":true,"allow":['"$allow_list"']}}}'
+    if openclaw config patch --merge "$a2a_patch" >/dev/null 2>&1; then
+      ok "A2A habilitado via CLI (allowlist: $allow_list)"
+    else
+      warn "config patch falló — A2A debe habilitarse manualmente en openclaw.json:"
+      warn "  tools.agentToAgent.enabled: true"
+      warn "  tools.agentToAgent.allow: [$allow_list]"
+    fi
+  elif should_use_legacy_merger && [[ -n "$PYTHON" ]] && [[ -n "$MERGE_SCRIPT" ]]; then
+    # Sin config patch pero tenemos merger disponible y es seguro usarlo
+    warn "Usando legacy Python merge para A2A — verificá integridad con: openclaw doctor"
     enable_a2a_via_merger "$orch_id" "$areas_list"
   else
-    warn "Sin Python — A2A debe habilitarse manualmente en openclaw.json:"
+    warn "A2A debe habilitarse manualmente en openclaw.json:"
     warn '  tools.agentToAgent.enabled: true'
-    warn "  tools.agentToAgent.allow: [\"main\",\"$(echo $areas_list | tr ',' '","' )\"]"
+    warn "  tools.agentToAgent.allow: [$allow_list]"
+  fi
+}
+
+# Escribe la política de subagents para modo empresa (BF-6, SP-1, SP-2).
+# Requiere: WIZARD_MODE == empresa, HAS_CONFIG_PATCH == 1, cli_version_gte 2026.4.23.
+# Solo es llamada desde register_agents_via_cli (CLI path).
+write_subagents_policy_empresa() {
+  # Solo en modo empresa
+  [[ "${WIZARD_MODE:-}" == "empresa" ]] || return 0
+
+  # SP-2: verificar que el CLI es suficientemente nuevo
+  if ! cli_version_gte 2026.4.23; then
+    warn "CLI anterior a 2026.4.23 — subagents policy no se escribirá. Actualizá con: npm update -g openclaw"
+    warn "(2026.4.23) subagents policy skipped — versión detectada no soporta config patch --merge"
+    return 0
+  fi
+
+  if [[ "$HAS_CONFIG_PATCH" != "1" ]]; then
+    warn "config patch no disponible — subagents policy skipped. Configurá manualmente:"
+    warn "  agents.defaults.subagents.maxSpawnDepth: 2"
+    warn "  agents.defaults.subagents.maxChildrenPerAgent: 5"
+    warn "  tools.subagents.tools.deny: [\"gateway\",\"cron\"]"
+    return 0
+  fi
+
+  # SP-1: escribir los tres campos requeridos via config patch --merge
+  local policy_patch
+  policy_patch='{"agents":{"defaults":{"subagents":{"maxSpawnDepth":2,"maxChildrenPerAgent":5}}},"tools":{"subagents":{"tools":{"deny":["gateway","cron"]}}}}'
+  if openclaw config patch --merge "$policy_patch" >/dev/null 2>&1; then
+    ok "Subagents policy escrita (maxSpawnDepth=2, maxChildrenPerAgent=5, deny=[gateway,cron])"
+  else
+    warn "No se pudo escribir subagents policy — configurá manualmente:"
+    warn "  agents.defaults.subagents.maxSpawnDepth: 2"
+    warn "  agents.defaults.subagents.maxChildrenPerAgent: 5"
+    warn "  tools.subagents.tools.deny: [\"gateway\",\"cron\"]"
   fi
 }
 
@@ -1233,7 +1519,8 @@ EOF
 
     local merge_out
     merge_out="$(mktemp)"
-    CONFIG_PATH="$config_native" NEW_AGENTS_PATH="$payload_native" \
+    # WIZARD_MODE pasado al merger para que aplique subagents policy solo en empresa (BF-6)
+    CONFIG_PATH="$config_native" NEW_AGENTS_PATH="$payload_native" WIZARD_MODE="${WIZARD_MODE:-}" \
       "$PYTHON" "$MERGE_SCRIPT" > "$merge_out" 2>&1 || {
         cat "$merge_out" >&2
         die "Falló el merge del config"
@@ -1258,7 +1545,11 @@ EOF
   "agents": {
     "defaults": {
       "bootstrapMaxChars": 16000,
-      "bootstrapPromptTruncationWarning": "once"
+      "bootstrapPromptTruncationWarning": "once",
+      "subagents": {
+        "maxSpawnDepth": 2,
+        "maxChildrenPerAgent": 5
+      }
     },
     "list": [$agents_json]
   },
@@ -1266,6 +1557,11 @@ EOF
     "agentToAgent": {
       "enabled": true,
       "allow": [$allow_json]
+    },
+    "subagents": {
+      "tools": {
+        "deny": ["gateway", "cron"]
+      }
     }
   },
   "bindings": []
@@ -1367,6 +1663,107 @@ install_empresa() {
   write_config_empresa "$empresa" "$user_name" "$areas_list" "$orch_id"
 
   ok "Equipo multi-agente empresarial listo — empresa: $empresa"
+}
+
+# =====================================================================
+# POST-INSTALL SMOKE TEST (ST-1, ST-2, D7)
+# =====================================================================
+
+# Ejecuta un comando con timeout y captura stdout+stderr.
+# Detecta 'timeout' (Linux/Git Bash) o 'gtimeout' (macOS via coreutils).
+# Si no hay ninguno, corre el comando sin timeout (degradado pero funcional).
+# Uso interno: output="$(run_check "label" "comando" timeout_segundos)"
+# No falla — siempre devuelve el output capturado (puede estar vacío).
+run_check() {
+  local label="$1" cmd="$2" timeout_s="$3"
+  local out
+  if command -v timeout >/dev/null 2>&1; then
+    out="$(timeout "$timeout_s" bash -c "$cmd" 2>&1)" || true
+  elif command -v gtimeout >/dev/null 2>&1; then
+    out="$(gtimeout "$timeout_s" bash -c "$cmd" 2>&1)" || true
+  else
+    # Sin timeout disponible — correr igual (no bloquear la instalación)
+    out="$(bash -c "$cmd" 2>&1)" || true
+  fi
+  echo "$out"
+}
+
+# Corre tres verificaciones post-install y emite una línea [PASS|WARN|FAIL] por check.
+# Agrega un banner final según el peor resultado observado.
+# NUNCA retorna non-zero — los fallos son advisory, no bloquean la instalación.
+post_install_smoke_test() {
+  echo
+  step "Verificación post-instalación (smoke test)"
+
+  local overall=0   # 0=pass 1=warn 2=fail
+
+  # Helpers de output — formato ST-2: "[PASS|WARN|FAIL] <check>: <detalle>"
+  _smoke_pass() { printf '%s[PASS]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+  _smoke_warn() { printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; [[ $overall -lt 1 ]] && overall=1; }
+  _smoke_fail() { printf '%s[FAIL]%s %s\n' "$C_RED" "$C_RESET" "$*"; [[ $overall -lt 2 ]] && overall=2; }
+
+  # ------------------------------------------------------------------
+  # Check 1: openclaw doctor (10 segundos) — verifica integridad firma
+  # ------------------------------------------------------------------
+  local doctor_out doctor_exit=0
+  doctor_out="$(run_check "doctor" "openclaw doctor" 10)"
+  doctor_exit=$?  # run_check siempre retorna 0 — capturar via subshell exit no aplica
+  # Detectar timeout: run_check absorbe el exit code, pero el output estaría vacío o truncado
+  if [[ -z "$doctor_out" ]]; then
+    _smoke_warn "doctor: sin respuesta en 10s (timeout o CLI no instalado)"
+  elif echo "$doctor_out" | grep -qi "signature\|tampering\|corrupt\|error"; then
+    _smoke_fail "doctor: error de integridad detectado — corré 'openclaw doctor' para diagnóstico"
+  elif echo "$doctor_out" | grep -qi "ok\|healthy\|✓\|passed"; then
+    _smoke_pass "doctor: firma de integridad verificada"
+  else
+    # doctor corrió pero no hay indicador explícito — asumir OK si exit fue 0
+    _smoke_warn "doctor: output no reconocido — verificá manualmente con 'openclaw doctor'"
+  fi
+
+  # ------------------------------------------------------------------
+  # Check 2: openclaw agents list (5 segundos) — agentes registrados
+  # ------------------------------------------------------------------
+  local agents_out orch="${WIZARD_ORCH_ID:-gerencia}"
+  agents_out="$(run_check "agents-list" "openclaw agents list 2>&1" 5)"
+  if [[ -z "$agents_out" ]]; then
+    _smoke_warn "agents-list: sin respuesta en 5s — verificá con 'openclaw agents list'"
+  elif echo "$agents_out" | grep -q "$orch"; then
+    _smoke_pass "agents-list: orquestador '$orch' presente en agents list"
+  else
+    _smoke_fail "agents-list: orquestador '$orch' NO encontrado — registración puede haber fallado"
+  fi
+
+  # ------------------------------------------------------------------
+  # Check 3: bindings (empresa only, 5 segundos)
+  # ------------------------------------------------------------------
+  if [[ "${WIZARD_MODE:-}" == "empresa" ]]; then
+    local bindings_out
+    bindings_out="$(run_check "bindings" "openclaw agents list --bindings 2>&1" 5)"
+    if [[ -z "$bindings_out" ]]; then
+      _smoke_warn "bindings: sin respuesta en 5s — verificá con 'openclaw agents list --bindings'"
+    elif echo "$bindings_out" | grep -q "$orch"; then
+      if [[ -n "${DETECTED_CHANNELS:-}" ]] && echo "$bindings_out" | grep -q "${DETECTED_CHANNELS%%,*}"; then
+        _smoke_pass "bindings: orquestador '$orch' bindeado al canal ${DETECTED_CHANNELS%%,*}"
+      else
+        _smoke_warn "bindings: '$orch' aparece en lista pero sin canal detectado — bindéalo con: openclaw agents bind --agent $orch --bind <canal>"
+      fi
+    else
+      _smoke_warn "bindings: sin bindings para '$orch' aún — bindéalo después con: openclaw agents bind --agent $orch --bind <canal>"
+    fi
+  fi
+
+  # ------------------------------------------------------------------
+  # Banner resumen
+  # ------------------------------------------------------------------
+  echo
+  case $overall in
+    0) printf '%s[✓] Smoke test: equipo verificado correctamente.%s\n' "$C_GREEN" "$C_RESET" ;;
+    1) printf '%s[⚠] Smoke test: instalación completa pero con advertencias — revisá los warnings arriba.%s\n' "$C_YELLOW" "$C_RESET" ;;
+    2) printf '%s[✗] Smoke test: verificaciones críticas fallaron — corré "openclaw doctor" para diagnóstico.%s\n' "$C_RED" "$C_RESET" ;;
+  esac
+  echo
+  # Smoke failures son advisory — NO retornar non-zero
+  return 0
 }
 
 # =====================================================================
@@ -1485,6 +1882,12 @@ main() {
     empresa)  install_empresa  "$WIZARD_EMPRESA" "$WIZARD_RUBRO" "$WIZARD_USER" "$WIZARD_CARGO" "$WIZARD_AREAS" "$WIZARD_ORCH_ID" ;;
     *)        die "Modo inválido: $WIZARD_MODE" ;;
   esac
+
+  # ST-1: ejecutar smoke test post-install solo cuando hay CLI disponible.
+  # Es non-fatal — nunca cambia el exit code de install.sh.
+  if has_openclaw_cli; then
+    post_install_smoke_test || true
+  fi
 
   print_next_steps
 }

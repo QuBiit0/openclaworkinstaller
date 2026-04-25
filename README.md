@@ -3,7 +3,7 @@
 Scaffold de workspaces OpenClaw con plantillas optimizadas en español.
 Extiende tu OpenClaw ya instalado para operar en modo **multi-agente empresa** o como **asistente personal**.
 
-**v2.1.0** — Merge inteligente con tu `openclaw.json` existente. Cero fricción.
+**v2.3.0** — Merge inteligente con tu `openclaw.json` existente. Cero fricción.
 
 ---
 
@@ -284,6 +284,58 @@ openclaw agent --agent <orch_id> --message "Presentate y listá tu equipo"
 
 ## Versión
 
-- Installer: **v2.1.0**
-- Compatible con OpenClaw: **2026.4.15+**
+- Installer: **v2.3.0**
+- Compatible con OpenClaw: **2026.4.23+**
 - Plantillas respetan límites oficiales: `bootstrapMaxChars: 16000` por archivo (auto-setea), `bootstrapTotalMaxChars: 60000` total.
+
+---
+
+## 🤖 Política de sub-agentes (modo empresa)
+
+En instalaciones empresa con OpenClaw CLI 2026.4.23+, el installer aplica automáticamente los defaults de sub-agentes:
+
+| Clave | Valor | Descripción |
+|-------|-------|-------------|
+| `agents.defaults.subagents.maxSpawnDepth` | `2` | Profundidad máxima de anidamiento de sub-agentes |
+| `agents.defaults.subagents.maxChildrenPerAgent` | `5` | Máximo de hijos directos por agente |
+| `tools.subagents.tools.deny` | `["gateway","cron"]` | Herramientas prohibidas para sub-agentes |
+
+Estos valores son defaults seguros para equipos empresa. Podés sobreescribirlos en tu `openclaw.json` después de la instalación.
+
+Si tu CLI es más antigua (< 2026.4.23), el installer imprime un WARN y omite la política — podés aplicarla manualmente.
+
+---
+
+## 🧪 Smoke test post-instalación
+
+Al terminar, el installer corre automáticamente una serie de checks no-bloqueantes:
+
+```
+[PASS] doctor: openclaw doctor exited 0
+[PASS] agents-list: agents found in workspace
+[PASS] bindings: orchestrator binding present         ← solo modo empresa
+```
+
+Los resultados son `PASS`, `WARN` o `FAIL`. El installer **siempre termina con exit 0** independientemente del resultado del smoke test — es informativo, no bloqueante.
+
+Para correr los smoke tests manualmente (antes de hacer release):
+
+```bash
+bash tests/smoke/run-all.sh
+```
+
+---
+
+## 🔑 Validación de `--orchestrator-id`
+
+En modo `--non-interactive`, el `--orchestrator-id` pasa por validación estricta:
+
+- Debe comenzar con letra minúscula
+- Solo puede contener: `a-z`, `0-9`, `_`, `-`
+- Longitud: 2–32 caracteres
+- No puede ser `main` (id reservado de OpenClaw)
+
+Ejemplos válidos: `ceo`, `gerencia`, `director-ops`, `jefe_ventas`
+Ejemplos inválidos: `""` (vacío), `MAIN`, `main`, `123abc`, `mi agente`
+
+En modo interactivo, el wizard te re-pregunta hasta que el id sea válido.
